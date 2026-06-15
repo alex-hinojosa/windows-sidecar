@@ -1,0 +1,65 @@
+name: Windows CI
+
+on:
+  pull_request:
+    paths:
+      - "sidecar/**"
+      - "td/**"
+      - "scripts/**"
+      - ".github/workflows/windows-ci.yml"
+      - "go.work"
+  push:
+    branches:
+      - main
+    paths:
+      - "sidecar/**"
+      - "td/**"
+      - "scripts/**"
+      - ".github/workflows/windows-ci.yml"
+      - "go.work"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.8"
+
+      - name: Test td Windows patches
+        shell: pwsh
+        working-directory: td
+        run: go test ./internal/config
+
+      - name: Test sidecar Windows patches
+        shell: pwsh
+        working-directory: sidecar
+        run: go test ./cmd/sidecar ./internal/tty ./internal/plugins/workspace
+
+      - name: Build and smoke test
+        shell: pwsh
+        run: .\scripts\build-windows.ps1 -SmokeTest -UseSystemGo
+
+      - name: Doctor without mux probe
+        shell: pwsh
+        run: .\scripts\doctor-windows.ps1 -SkipMuxProbe -AllowMissingMux
+
+      - name: Package
+        shell: pwsh
+        run: .\scripts\package-windows.ps1 -Version ci -SkipBuild
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-sidecar-ci
+          path: |
+            dist/*.zip
+            dist/*.sha256
