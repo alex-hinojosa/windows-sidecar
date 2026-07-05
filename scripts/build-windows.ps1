@@ -74,9 +74,15 @@ function Invoke-SmokeCommand {
     $exitCode = 1
     try {
         $null = $process.Start()
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
+        # Drain stdout+stderr concurrently (async) BEFORE WaitForExit to avoid the
+        # classic .NET dual-pipe deadlock: a child that fills one pipe's ~4KB buffer
+        # while the parent is still blocked on a sequential ReadToEnd() of the other
+        # would wedge forever (M7). ReadToEndAsync starts draining both immediately.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
         $exitCode = $process.ExitCode
     } finally {
         $process.Dispose()

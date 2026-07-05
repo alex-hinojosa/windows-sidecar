@@ -37,12 +37,12 @@ jobs:
       - name: Test td Windows patches
         shell: pwsh
         working-directory: td
-        run: go test ./internal/config
+        run: go test ./internal/config ./internal/db ./internal/editor ./internal/fsutil ./internal/git ./internal/serve ./internal/session ./internal/syncconfig ./internal/workdir
 
       - name: Test sidecar Windows patches
         shell: pwsh
         working-directory: sidecar
-        run: go test ./cmd/sidecar ./internal/tty ./internal/plugins/workspace
+        run: go test ./cmd/sidecar ./internal/tty ./internal/plugins/workspace ./internal/plugins/notes ./internal/plugins/gitstatus ./internal/projectdir ./internal/adapter/cache ./internal/adapter/claudecode ./internal/adapter/piagent ./internal/adapter/cursor ./internal/adapter/warp ./internal/adapter/kiro
 
       - name: Build and smoke test
         shell: pwsh

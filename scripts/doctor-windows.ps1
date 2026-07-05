@@ -95,8 +95,19 @@ function Invoke-MuxCommand {
         [string[]]$Arguments
     )
 
-    $output = & $MuxCommand @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    # Windows PowerShell 5.1 promotes a native command's stderr (surfaced via 2>&1)
+    # to a TERMINATING error when the caller's $ErrorActionPreference is 'Stop';
+    # several mux probes (e.g. kill-session against a fresh GUID session) are
+    # EXPECTED to write to stderr. Pin Continue locally so an expected failure is
+    # captured as output instead of hard-throwing a spurious FAIL (M7).
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $MuxCommand @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     [pscustomobject]@{
         ExitCode = $exitCode
         Lines = @($output | ForEach-Object { "$_" })
