@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,11 +68,21 @@ func TestSnapshotThresholdEnvOverridesConfig(t *testing.T) {
 	}
 }
 
-// writeTestConfig creates a temp HOME with ~/.config/td/config.json and returns cleanup.
-func writeTestConfig(t *testing.T, cfg *Config) {
+// setTestHome points the user home directory at a fresh temp dir.
+// os.UserHomeDir reads HOME on Unix and USERPROFILE on Windows, so both are
+// set to keep the tests hermetic on every platform.
+func setTestHome(t *testing.T) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	return tmpDir
+}
+
+// writeTestConfig creates a temp HOME with ~/.config/td/config.json and returns cleanup.
+func writeTestConfig(t *testing.T, cfg *Config) {
+	t.Helper()
+	tmpDir := setTestHome(t)
 	dir := filepath.Join(tmpDir, ".config", "td")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -86,6 +97,84 @@ func writeTestConfig(t *testing.T, cfg *Config) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestSaveLoadAuthRoundTrip verifies SaveAuth/LoadAuth round-trip the API key
+// and that on Windows the key is DPAPI-protected at rest (never plaintext on
+// disk).
+func TestSaveLoadAuthRoundTrip(t *testing.T) {
+	tmpDir := setTestHome(t)
+
+	const secret = "td_key_sk-secret-roundtrip-12345"
+	in := &AuthCredentials{
+		APIKey:    secret,
+		UserID:    "user_1",
+		Email:     "a@b.test",
+		ServerURL: "http://localhost:8080",
+		DeviceID:  "dev_1",
+		ExpiresAt: "2027-01-01T00:00:00Z",
+	}
+	if err := SaveAuth(in); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+	// SaveAuth must not mutate the caller's struct.
+	if in.APIKey != secret {
+		t.Errorf("SaveAuth mutated caller APIKey to %q", in.APIKey)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(tmpDir, ".config", "td", "auth.json"))
+	if err != nil {
+		t.Fatalf("read auth.json: %v", err)
+	}
+	if dpapiAvailable {
+		if strings.Contains(string(raw), secret) {
+			t.Error("auth.json contains the plaintext API key; expected DPAPI ciphertext")
+		}
+		if !strings.Contains(string(raw), "api_key_protected") {
+			t.Error("auth.json missing api_key_protected field on Windows")
+		}
+	} else {
+		if !strings.Contains(string(raw), secret) {
+			t.Error("auth.json should contain the plaintext key on non-Windows platforms")
+		}
+	}
+
+	out, err := LoadAuth()
+	if err != nil {
+		t.Fatalf("LoadAuth: %v", err)
+	}
+	if out == nil {
+		t.Fatal("LoadAuth returned nil credentials")
+	}
+	if out.APIKey != secret {
+		t.Errorf("APIKey = %q, want %q", out.APIKey, secret)
+	}
+	if out.UserID != in.UserID || out.Email != in.Email || out.ServerURL != in.ServerURL ||
+		out.DeviceID != in.DeviceID || out.ExpiresAt != in.ExpiresAt {
+		t.Errorf("credentials did not round-trip: %+v", out)
+	}
+}
+
+// TestLoadAuthPlaintextBackcompat verifies pre-DPAPI auth.json files with a
+// plaintext api_key still load on every platform.
+func TestLoadAuthPlaintextBackcompat(t *testing.T) {
+	tmpDir := setTestHome(t)
+	dir := filepath.Join(tmpDir, ".config", "td")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	legacy := `{"api_key":"legacy-plain-key","user_id":"u2","email":"c@d.test","server_url":"http://localhost:8080","device_id":"dev_2","expires_at":""}`
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(legacy), 0600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+
+	out, err := LoadAuth()
+	if err != nil {
+		t.Fatalf("LoadAuth: %v", err)
+	}
+	if out.APIKey != "legacy-plain-key" {
+		t.Errorf("APIKey = %q, want legacy-plain-key", out.APIKey)
+	}
+}
 
 func TestAutoSyncEnabledFromConfig(t *testing.T) {
 	writeTestConfig(t, &Config{Sync: SyncConfig{Auto: AutoSyncConfig{Enabled: boolPtr(false)}}})

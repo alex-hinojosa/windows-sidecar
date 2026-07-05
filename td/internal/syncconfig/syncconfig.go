@@ -36,12 +36,16 @@ type Config struct {
 
 // AuthCredentials stores authentication state at ~/.config/td/auth.json.
 type AuthCredentials struct {
-	APIKey    string `json:"api_key"`
-	UserID    string `json:"user_id"`
-	Email     string `json:"email"`
-	ServerURL string `json:"server_url"`
-	DeviceID  string `json:"device_id"`
-	ExpiresAt string `json:"expires_at"`
+	APIKey string `json:"api_key,omitempty"`
+	// APIKeyProtected holds the DPAPI-encrypted API key (base64) on Windows,
+	// where POSIX 0600 permissions are a no-op. When set, APIKey is kept off
+	// disk and is populated transparently by LoadAuth.
+	APIKeyProtected string `json:"api_key_protected,omitempty"`
+	UserID          string `json:"user_id"`
+	Email           string `json:"email"`
+	ServerURL       string `json:"server_url"`
+	DeviceID        string `json:"device_id"`
+	ExpiresAt       string `json:"expires_at"`
 }
 
 const defaultServerURL = "http://localhost:8080"
@@ -109,16 +113,37 @@ func LoadAuth() (*AuthCredentials, error) {
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return nil, err
 	}
+	// Transparently decrypt a DPAPI-protected key (Windows). Plaintext
+	// api_key entries (pre-DPAPI files, or files written on other platforms)
+	// are returned as-is for backward compatibility.
+	if creds.APIKeyProtected != "" && creds.APIKey == "" {
+		key, err := unprotectAPIKey(creds.APIKeyProtected)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt api key (auth.json may belong to another user or machine): %w", err)
+		}
+		creds.APIKey = key
+	}
 	return &creds, nil
 }
 
 // SaveAuth writes auth credentials to ~/.config/td/auth.json (0600 perms).
+// On Windows the API key is transparently encrypted with DPAPI before it is
+// written, since POSIX file modes do not restrict access there.
 func SaveAuth(creds *AuthCredentials) error {
 	dir, err := ConfigDir()
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(creds, "", "  ")
+	toWrite := *creds
+	if dpapiAvailable && toWrite.APIKey != "" {
+		protected, err := protectAPIKey(toWrite.APIKey)
+		if err != nil {
+			return fmt.Errorf("protect api key: %w", err)
+		}
+		toWrite.APIKeyProtected = protected
+		toWrite.APIKey = ""
+	}
+	data, err := json.MarshalIndent(&toWrite, "", "  ")
 	if err != nil {
 		return err
 	}

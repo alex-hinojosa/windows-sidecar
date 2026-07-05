@@ -26,6 +26,11 @@ type PortInfo struct {
 	PID        int       `json:"pid"`
 	StartedAt  time.Time `json:"started_at"`
 	InstanceID string    `json:"instance_id"`
+
+	// Token is the bearer token clients must send in the Authorization
+	// header. Empty when the server was started with authentication
+	// explicitly disabled.
+	Token string `json:"token,omitempty"`
 }
 
 // GenerateInstanceID creates a new random instance ID with the srv_ prefix
@@ -77,8 +82,9 @@ func WritePortFile(baseDir string, info *PortInfo) error {
 		return fmt.Errorf("marshal port info: %w", err)
 	}
 
+	// 0600: the port file may carry the auth token, so keep it owner-readable.
 	pfPath := portFilePath(baseDir)
-	if err := os.WriteFile(pfPath, data, 0644); err != nil {
+	if err := os.WriteFile(pfPath, data, 0600); err != nil {
 		return fmt.Errorf("write port file: %w", err)
 	}
 

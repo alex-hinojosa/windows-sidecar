@@ -1,6 +1,7 @@
 package db
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -38,6 +39,70 @@ func TestToRepoRelative_SamePath(t *testing.T) {
 	}
 	if rel != "." {
 		t.Errorf("expected '.', got %s", rel)
+	}
+}
+
+// TestToRepoRelative_WindowsCaseInsensitive verifies that different path
+// casing (cmd reports `c:\proj`, PowerShell `C:\proj`) does not produce a
+// false "outside repo root" on Windows, and that the returned relative path
+// keeps the file's original casing.
+func TestToRepoRelative_WindowsCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only behavior")
+	}
+
+	tests := []struct {
+		name     string
+		absPath  string
+		repoRoot string
+		want     string
+	}{
+		{
+			name:     "lowercase drive letter vs uppercase root",
+			absPath:  `c:\proj\src\Main.go`,
+			repoRoot: `C:\proj`,
+			want:     "src/Main.go",
+		},
+		{
+			name:     "folded directory casing",
+			absPath:  `C:\Proj\SRC\file.go`,
+			repoRoot: `c:\proj`,
+			want:     "SRC/file.go",
+		},
+		{
+			name:     "same path different casing",
+			absPath:  `c:\PROJ`,
+			repoRoot: `C:\proj`,
+			want:     ".",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rel, err := ToRepoRelative(tt.absPath, tt.repoRoot)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rel != tt.want {
+				t.Errorf("rel = %q, want %q", rel, tt.want)
+			}
+		})
+	}
+
+	// Still outside the root regardless of casing
+	if _, err := ToRepoRelative(`c:\other\file.go`, `C:\proj`); err == nil {
+		t.Error("expected error for path outside repo root")
+	}
+}
+
+// TestToRepoRelative_UnixStaysCaseSensitive pins the Unix behavior: paths
+// differing only by case are distinct.
+func TestToRepoRelative_UnixStaysCaseSensitive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only behavior")
+	}
+	if _, err := ToRepoRelative("/home/User/project/file.go", "/home/user/project"); err == nil {
+		t.Error("expected error: unix path comparison must stay case-sensitive")
 	}
 }
 

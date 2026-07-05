@@ -131,18 +131,17 @@ func TestDetectAgentAncestorReturnsUnknownForNoAgent(t *testing.T) {
 	}
 }
 
-func TestGetTerminalSessionID(t *testing.T) {
-	// Clear any terminal session vars
-	for _, env := range []string{
-		"TERM_SESSION_ID",
-		"TMUX_PANE",
-		"STY",
-		"WINDOWID",
-		"KONSOLE_DBUS_SESSION",
-		"GNOME_TERMINAL_SCREEN",
-	} {
-		os.Unsetenv(env)
+// clearTerminalEnv clears every terminal session env var, restoring the
+// original values when the test finishes.
+func clearTerminalEnv(t *testing.T) {
+	t.Helper()
+	for _, env := range terminalSessionEnvVars {
+		t.Setenv(env, "")
 	}
+}
+
+func TestGetTerminalSessionID(t *testing.T) {
+	clearTerminalEnv(t)
 
 	// Should return empty when no terminal vars set
 	result := getTerminalSessionID()
@@ -155,6 +154,43 @@ func TestGetTerminalSessionID(t *testing.T) {
 	result = getTerminalSessionID()
 	if result != "test-terminal-123" {
 		t.Errorf("getTerminalSessionID() = %q, want %q", result, "test-terminal-123")
+	}
+}
+
+// TestGetTerminalSessionIDFallbacks verifies each supported terminal env var
+// is detected on its own, including the Windows Terminal (WT_SESSION) and
+// Claude Code (CLAUDE_CODE_SSE_PORT) identifiers added for the Windows port.
+func TestGetTerminalSessionIDFallbacks(t *testing.T) {
+	for _, env := range terminalSessionEnvVars {
+		t.Run(env, func(t *testing.T) {
+			clearTerminalEnv(t)
+			t.Setenv(env, "session-value-42")
+			if got := getTerminalSessionID(); got != "session-value-42" {
+				t.Errorf("getTerminalSessionID() with %s set = %q, want %q", env, got, "session-value-42")
+			}
+		})
+	}
+}
+
+// TestTerminalFallbackYieldsTerminalFingerprint verifies the Priority 4 path in
+// GetAgentFingerprint: with no explicit ID, no agent env, and no agent ancestor,
+// a terminal env var must yield AgentTerminal instead of AgentUnknown.
+func TestTerminalFallbackYieldsTerminalFingerprint(t *testing.T) {
+	os.Unsetenv("TD_SESSION_ID")
+	os.Unsetenv("CURSOR_AGENT")
+	clearTerminalEnv(t)
+	t.Setenv("WT_SESSION", "d3adb33f-0000-4000-8000-000000000000")
+
+	fp := GetAgentFingerprint()
+
+	// The cached ancestor walk may legitimately detect a real agent (e.g. the
+	// test running under Claude Code). Only assert on the fallback when the
+	// ancestor walk found nothing.
+	if cachedAncestor.Type == AgentUnknown && fp.Type != AgentTerminal {
+		t.Errorf("Type = %q, want %q when only a terminal env var is set", fp.Type, AgentTerminal)
+	}
+	if fp.Type == AgentUnknown {
+		t.Errorf("Type = %q; terminal fallback should prevent unknown", fp.Type)
 	}
 }
 

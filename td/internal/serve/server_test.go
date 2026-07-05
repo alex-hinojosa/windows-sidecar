@@ -294,6 +294,171 @@ func TestCORSMiddleware_NoOriginHeader(t *testing.T) {
 }
 
 // ============================================================================
+// CSRF Middleware Tests
+// ============================================================================
+
+func TestCSRFMiddleware_CrossOriginWriteRejected(t *testing.T) {
+	srv := newTestServer(ServeConfig{})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/issues/td-abc/approve", nil)
+	req.Header.Set("Origin", "http://evil.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d for cross-origin write", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestCSRFMiddleware_NullOriginWriteRejected(t *testing.T) {
+	srv := newTestServer(ServeConfig{})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/issues/td-abc", nil)
+	req.Header.Set("Origin", "null")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d for null-origin write", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestCSRFMiddleware_LocalhostOriginWriteAllowed(t *testing.T) {
+	srv := newTestServer(ServeConfig{})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	for _, origin := range []string{"http://localhost:3000", "http://127.0.0.1:8080"} {
+		req, _ := http.NewRequest("PUT", ts.URL+"/v1/focus", nil)
+		req.Header.Set("Origin", origin)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusForbidden {
+			t.Errorf("origin %s: status = %d, localhost origins must not be rejected", origin, resp.StatusCode)
+		}
+	}
+}
+
+func TestCSRFMiddleware_ConfiguredCORSOriginWriteAllowed(t *testing.T) {
+	srv := newTestServer(ServeConfig{CORSOrigin: "http://app.example.com"})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("PUT", ts.URL+"/v1/focus", nil)
+	req.Header.Set("Origin", "http://app.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = %d, explicitly configured CORS origin must not be rejected", resp.StatusCode)
+	}
+}
+
+func TestCSRFMiddleware_ReadsExempt(t *testing.T) {
+	srv := newTestServer(ServeConfig{})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/issues", nil)
+	req.Header.Set("Origin", "http://evil.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = %d, GET requests must not be CSRF-rejected", resp.StatusCode)
+	}
+}
+
+func TestCSRFMiddleware_DNSRebindingHostRejected(t *testing.T) {
+	srv := newTestServer(ServeConfig{Addr: "localhost"})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/issues", nil)
+	req.Host = "attacker.example.com" // simulates DNS rebinding
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d for non-local Host header", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestCSRFMiddleware_NoOriginLocalClientAllowed(t *testing.T) {
+	srv := newTestServer(ServeConfig{})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Plain local client (no Origin header, loopback Host) must pass.
+	req, _ := http.NewRequest("PUT", ts.URL+"/v1/focus", nil)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		t.Errorf("status = %d, local non-browser writes must not be rejected", resp.StatusCode)
+	}
+}
+
+// ============================================================================
+// Token Generation Tests
+// ============================================================================
+
+func TestGenerateToken(t *testing.T) {
+	tok1, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if len(tok1) != 32 {
+		t.Errorf("token length = %d, want 32", len(tok1))
+	}
+	for _, c := range tok1 {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("token contains non-hex char %q", c)
+		}
+	}
+	tok2, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if tok1 == tok2 {
+		t.Error("two generated tokens should not be equal")
+	}
+}
+
+// ============================================================================
 // Recovery Middleware Tests
 // ============================================================================
 

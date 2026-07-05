@@ -4,13 +4,24 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
-func TestLoadAssociations_MissingFile(t *testing.T) {
-	// Point HOME to a temp dir so ConfigDir returns an empty config
+// setTestHome points the user home at a fresh temp dir on every platform.
+// os.UserHomeDir reads HOME on Unix and USERPROFILE on Windows.
+func setTestHome(t *testing.T) string {
+	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+	return tmp
+}
+
+func TestLoadAssociations_MissingFile(t *testing.T) {
+	// Point the home dir at a temp dir so ConfigDir returns an empty config
+	setTestHome(t)
 
 	assoc, err := LoadAssociations()
 	if err != nil {
@@ -22,12 +33,11 @@ func TestLoadAssociations_MissingFile(t *testing.T) {
 }
 
 func TestLoadSaveRoundTrip(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	tmp := setTestHome(t)
 
 	input := map[string]string{
-		"/Users/alice/code/repo-one":   "/Users/alice/notes/vault-one",
-		"/Users/alice/code/repo-two":   "/Users/alice/notes/vault-two",
+		filepath.Join(tmp, "code", "repo-one"): filepath.Join(tmp, "notes", "vault-one"),
+		filepath.Join(tmp, "code", "repo-two"): filepath.Join(tmp, "notes", "vault-two"),
 	}
 
 	if err := SaveAssociations(input); err != nil {
@@ -49,43 +59,74 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLookupAssociation(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-
-	// Create config dir and write associations
-	configDir := filepath.Join(tmp, ".config", "td")
+// writeAssociations writes an associations.json under the test home dir.
+func writeAssociations(t *testing.T, home string, assoc map[string]string) {
+	t.Helper()
+	configDir := filepath.Join(home, ".config", "td")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		t.Fatal(err)
-	}
-
-	assoc := map[string]string{
-		"/Users/alice/code/myrepo": "/Users/alice/projects/myproject",
 	}
 	data, _ := json.Marshal(assoc)
 	if err := os.WriteFile(filepath.Join(configDir, associationsFile), data, 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLookupAssociation(t *testing.T) {
+	tmp := setTestHome(t)
+
+	repoDir := filepath.Join(tmp, "code", "myrepo")
+	targetDir := filepath.Join(tmp, "projects", "myproject")
+	writeAssociations(t, tmp, map[string]string{repoDir: targetDir})
 
 	// Found
-	target, ok := LookupAssociation("/Users/alice/code/myrepo")
+	target, ok := LookupAssociation(repoDir)
 	if !ok {
 		t.Fatal("expected association to be found")
 	}
-	if target != "/Users/alice/projects/myproject" {
-		t.Errorf("expected /Users/alice/projects/myproject, got %s", target)
+	if target != targetDir {
+		t.Errorf("expected %s, got %s", targetDir, target)
 	}
 
 	// Not found
-	_, ok = LookupAssociation("/Users/alice/code/other")
+	_, ok = LookupAssociation(filepath.Join(tmp, "code", "other"))
 	if ok {
 		t.Fatal("expected no association")
 	}
 }
 
+// TestLookupAssociation_CaseInsensitiveOnWindows verifies that a lookup with
+// different path casing (cmd reports `c:\proj`, PowerShell `C:\proj`) still
+// resolves on Windows and still misses on case-sensitive Unix.
+func TestLookupAssociation_CaseInsensitiveOnWindows(t *testing.T) {
+	tmp := setTestHome(t)
+
+	repoDir := filepath.Join(tmp, "Code", "MyRepo")
+	targetDir := filepath.Join(tmp, "projects", "myproject")
+	writeAssociations(t, tmp, map[string]string{repoDir: targetDir})
+
+	swapped := strings.ToLower(repoDir)
+	if swapped == repoDir {
+		t.Skip("temp dir path has no upper-case characters to fold")
+	}
+
+	target, ok := LookupAssociation(swapped)
+	if runtime.GOOS == "windows" {
+		if !ok {
+			t.Fatalf("expected case-insensitive association hit for %s", swapped)
+		}
+		if target != targetDir {
+			t.Errorf("expected %s, got %s", targetDir, target)
+		}
+	} else {
+		if ok {
+			t.Fatalf("expected case-sensitive miss on %s for %s", runtime.GOOS, swapped)
+		}
+	}
+}
+
 func TestResolveBaseDir_TdRootPriorityOverAssociation(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	tmp := setTestHome(t)
 
 	// Set up a directory with both .td-root and an association
 	projectDir := filepath.Join(tmp, "project")
@@ -122,8 +163,7 @@ func TestResolveBaseDir_TdRootPriorityOverAssociation(t *testing.T) {
 }
 
 func TestResolveBaseDir_AssociationUsed(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	tmp := setTestHome(t)
 
 	// Set up a directory with only an association (no .td-root, no .todos)
 	projectDir := filepath.Join(tmp, "project")

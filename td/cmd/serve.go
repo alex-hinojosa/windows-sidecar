@@ -37,7 +37,8 @@ func init() {
 
 	serveCmd.Flags().IntP("port", "p", 0, "Port to listen on (0 = auto-assign)")
 	serveCmd.Flags().StringP("addr", "a", "localhost", "Address to bind to")
-	serveCmd.Flags().String("token", "", "Bearer token for authentication (optional)")
+	serveCmd.Flags().String("token", "", "Bearer token for authentication (default: randomly generated, written to the port file)")
+	serveCmd.Flags().Bool("no-token", false, "Disable bearer token authentication (not recommended)")
 	serveCmd.Flags().String("cors", "", "Allowed CORS origin (optional, e.g. http://localhost:3000)")
 	serveCmd.Flags().Duration("interval", 2*time.Second, "Poll interval for SSE events")
 }
@@ -70,8 +71,21 @@ func runServe(cmd *cobra.Command, args []string) error {
 	port, _ := cmd.Flags().GetInt("port")
 	addr, _ := cmd.Flags().GetString("addr")
 	token, _ := cmd.Flags().GetString("token")
+	noToken, _ := cmd.Flags().GetBool("no-token")
 	cors, _ := cmd.Flags().GetString("cors")
 	interval, _ := cmd.Flags().GetDuration("interval")
+
+	// Authentication defaults ON: generate a random token unless the caller
+	// provided one or explicitly opted out. Clients discover the token via
+	// the port file.
+	if noToken {
+		token = ""
+	} else if token == "" {
+		token, err = serve.GenerateToken()
+		if err != nil {
+			return fmt.Errorf("generate auth token: %w", err)
+		}
+	}
 
 	config := serve.ServeConfig{
 		Port:         port,
@@ -101,12 +115,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("generate instance id: %w", err)
 	}
 
-	// Write port file
+	// Write port file (includes the auth token so local clients can read it)
 	portInfo := &serve.PortInfo{
 		Port:       actualPort,
 		PID:        os.Getpid(),
 		StartedAt:  time.Now(),
 		InstanceID: instanceID,
+		Token:      token,
 	}
 	if err := serve.WritePortFile(dir, portInfo); err != nil {
 		ln.Close()
@@ -121,6 +136,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  database:   %s\n", dbPath)
 	fmt.Fprintf(os.Stderr, "  session:    %s (web)\n", session.ID)
 	fmt.Fprintf(os.Stderr, "  port file:  %s\n", portFilePath)
+	if token == "" {
+		fmt.Fprintf(os.Stderr, "  auth:       DISABLED (--no-token)\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "  auth:       bearer token (in port file)\n")
+	}
 
 	// Start HTTP server in background
 	srv.StartBackground(ctx)

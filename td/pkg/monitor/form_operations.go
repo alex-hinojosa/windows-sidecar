@@ -3,12 +3,12 @@ package monitor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/marcus/td/internal/editor"
 	"github.com/marcus/td/internal/models"
 	"github.com/marcus/td/internal/workflow"
 )
@@ -250,19 +250,19 @@ func (m Model) submitForm() (tea.Model, tea.Cmd) {
 }
 
 // openExternalEditor opens the Description field in an external editor
-// Uses $VISUAL > $EDITOR > vim fallback
+// Uses $VISUAL > $EDITOR > platform fallback (vim on Unix, notepad on Windows)
 func (m Model) openExternalEditor() (tea.Model, tea.Cmd) {
 	if m.FormState == nil {
 		return m, nil
 	}
 
 	// Get editor from environment
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
+	editorEnv := os.Getenv("VISUAL")
+	if editorEnv == "" {
+		editorEnv = os.Getenv("EDITOR")
 	}
-	if editor == "" {
-		editor = "vim"
+	if editorEnv == "" {
+		editorEnv = editor.Fallback("vim")
 	}
 
 	// Create temp file with .md extension for syntax highlighting
@@ -290,8 +290,17 @@ func (m Model) openExternalEditor() (tea.Model, tea.Cmd) {
 
 	tmpPath := tmpFile.Name()
 
-	// Create editor command
-	cmd := exec.Command(editor, tmpPath)
+	// Create editor command via the shared parser (handles quoted paths with
+	// spaces and trailing args, e.g. `"C:\Program Files\...\code.cmd" --wait`)
+	cmd, err := editor.Command(editorEnv, tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		m.StatusMessage = "Invalid editor command: " + err.Error()
+		m.StatusIsError = true
+		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			return ClearStatusMsg{}
+		})
+	}
 
 	// Use tea.ExecProcess to suspend TUI and run editor
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {

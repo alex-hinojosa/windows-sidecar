@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -13,6 +14,17 @@ const (
 	tdRootFile = ".td-root"
 	todosDir   = ".todos"
 )
+
+// samePath reports whether two cleaned paths refer to the same location.
+// Windows filesystems are case-insensitive, and different shells report
+// different drive-letter/path casing (`c:\proj` from cmd vs `C:\proj` from
+// PowerShell), so the comparison folds case there. Unix stays case-sensitive.
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
 
 // ResolveBaseDir resolves td's project root with conservative heuristics:
 //  1. Honor .td-root in the current directory.
@@ -58,7 +70,7 @@ func ResolveBaseDir(baseDir string) string {
 
 	// Check main worktree (handles external worktrees without .td-root)
 	mainRoot, err := gitMainWorktree(baseDir)
-	if err == nil && mainRoot != "" && mainRoot != gitRoot {
+	if err == nil && mainRoot != "" && !samePath(mainRoot, gitRoot) {
 		if resolved, ok := readTdRoot(mainRoot); ok {
 			return resolved
 		}
@@ -122,7 +134,7 @@ func gitMainWorktree(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if filepath.Clean(topLevel) == mainRoot {
+	if samePath(filepath.Clean(topLevel), mainRoot) {
 		return "", nil
 	}
 

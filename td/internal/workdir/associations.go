@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/marcus/td/internal/fsutil"
 	"github.com/marcus/td/internal/syncconfig"
 )
 
@@ -65,7 +66,13 @@ func SaveAssociations(assoc map[string]string) error {
 		return err
 	}
 
-	return os.Rename(tmpName, target)
+	// fsutil.Rename retries transient Windows sharing violations so the .tmp
+	// file is not orphaned when another process briefly holds the target.
+	if err := fsutil.Rename(tmpName, target); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // LookupAssociation checks if dir has a directory association configured.
@@ -85,6 +92,17 @@ func LookupAssociation(dir string) (string, bool) {
 	}
 
 	target, ok := assoc[dir]
+	if !ok {
+		// The filesystem is case-insensitive on Windows and shells report
+		// different casing (cmd vs PowerShell), so fall back to a
+		// case-folded scan of the (small) association map.
+		for key, val := range assoc {
+			if samePath(filepath.Clean(key), dir) {
+				target, ok = val, true
+				break
+			}
+		}
+	}
 	if !ok {
 		return "", false
 	}

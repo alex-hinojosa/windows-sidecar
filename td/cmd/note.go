@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/marcus/td/internal/db"
+	"github.com/marcus/td/internal/editor"
 	"github.com/marcus/td/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -348,11 +348,12 @@ var noteUnarchiveCmd = &cobra.Command{
 }
 
 // openEditorForContent opens the user's default editor with the given initial
-// content and returns the edited result. Uses $EDITOR or falls back to "vi".
+// content and returns the edited result. Uses $EDITOR or falls back to the
+// platform default (vi on Unix, notepad on Windows).
 func openEditorForContent(initial string) (string, error) {
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
+	editorEnv := os.Getenv("EDITOR")
+	if editorEnv == "" {
+		editorEnv = editor.Fallback("vi")
 	}
 
 	tmpFile, err := os.CreateTemp("", "td-note-*.md")
@@ -369,10 +370,12 @@ func openEditorForContent(initial string) (string, error) {
 	}
 	tmpFile.Close()
 
-	// Split editor command in case it includes args (e.g. "code --wait")
-	parts := strings.Fields(editor)
-	cmdArgs := append(parts[1:], tmpFile.Name())
-	editorCmd := exec.Command(parts[0], cmdArgs...)
+	// Parse the editor command; it may include args (e.g. "code --wait") and
+	// a quoted executable path containing spaces.
+	editorCmd, err := editor.Command(editorEnv, tmpFile.Name())
+	if err != nil {
+		return "", fmt.Errorf("invalid editor command %q: %w", editorEnv, err)
+	}
 	editorCmd.Stdin = os.Stdin
 	editorCmd.Stdout = os.Stdout
 	editorCmd.Stderr = os.Stderr

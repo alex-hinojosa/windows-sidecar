@@ -6,9 +6,24 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// shaPattern matches abbreviated or full hex commit SHAs. SHAs handed to the
+// range-diff helpers can originate from sync-shared database fields, so they
+// are validated before being placed in a git argv (a `-`-prefixed value would
+// otherwise be parsed as an option).
+var shaPattern = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
+
+// validateSHA rejects values that are not plain hex commit SHAs.
+func validateSHA(sha string) error {
+	if !shaPattern.MatchString(sha) {
+		return fmt.Errorf("invalid git SHA: %q", sha)
+	}
+	return nil
+}
 
 // State represents the current git state
 type State struct {
@@ -64,6 +79,9 @@ func GetState() (*State, error) {
 
 // GetCommitsSince returns the number of commits since a given SHA
 func GetCommitsSince(sha string) (int, error) {
+	if err := validateSHA(sha); err != nil {
+		return 0, err
+	}
 	output, err := runGit("rev-list", "--count", sha+"..HEAD")
 	if err != nil {
 		return 0, err
@@ -77,6 +95,9 @@ func GetCommitsSince(sha string) (int, error) {
 
 // GetChangedFilesSince returns changed files since a given SHA
 func GetChangedFilesSince(sha string) ([]FileChange, error) {
+	if err := validateSHA(sha); err != nil {
+		return nil, err
+	}
 	output, err := runGit("diff", "--stat", sha+"..HEAD")
 	if err != nil {
 		return nil, err
@@ -138,6 +159,9 @@ type DiffStats struct {
 
 // GetDiffStatsSince returns diff statistics since a given SHA
 func GetDiffStatsSince(sha string) (*DiffStats, error) {
+	if err := validateSHA(sha); err != nil {
+		return nil, err
+	}
 	output, err := runGit("diff", "--shortstat", sha+"..HEAD")
 	if err != nil {
 		return nil, err

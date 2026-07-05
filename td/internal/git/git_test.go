@@ -469,3 +469,52 @@ func TestStateBranchName(t *testing.T) {
 		t.Logf("Branch name is %q (expected main/master/HEAD)", state.Branch)
 	}
 }
+
+// TestValidateSHA verifies option-injection hardening: only plain hex SHAs
+// (4-40 chars) are accepted, so `-`-prefixed values from sync-shared DB
+// fields can never enter a git argv.
+func TestValidateSHA(t *testing.T) {
+	valid := []string{
+		"abcd",
+		"1234abcd",
+		"ABCDEF1234",
+		"0123456789abcdef0123456789abcdef01234567", // full 40-char SHA
+	}
+	for _, sha := range valid {
+		if err := validateSHA(sha); err != nil {
+			t.Errorf("validateSHA(%q) = %v, want nil", sha, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"abc",                    // too short
+		"--upload-pack=/bin/sh",  // option injection
+		"-abc1234",               // leading dash
+		"abcd1234..HEAD",         // range syntax
+		"HEAD",                   // symbolic ref
+		"main",                   // branch name
+		"abcd 1234",              // whitespace
+		"0123456789abcdef0123456789abcdef012345678", // 41 chars
+		"gggg1234", // non-hex
+	}
+	for _, sha := range invalid {
+		if err := validateSHA(sha); err == nil {
+			t.Errorf("validateSHA(%q) = nil, want error", sha)
+		}
+	}
+}
+
+// TestGetCommitsSinceRejectsInjection verifies the exported helpers refuse
+// non-SHA input before invoking git.
+func TestGetCommitsSinceRejectsInjection(t *testing.T) {
+	if _, err := GetCommitsSince("--upload-pack=/bin/sh"); err == nil {
+		t.Error("GetCommitsSince should reject option-like SHA")
+	}
+	if _, err := GetChangedFilesSince("-evil"); err == nil {
+		t.Error("GetChangedFilesSince should reject option-like SHA")
+	}
+	if _, err := GetDiffStatsSince("HEAD; rm -rf /"); err == nil {
+		t.Error("GetDiffStatsSince should reject non-hex SHA")
+	}
+}

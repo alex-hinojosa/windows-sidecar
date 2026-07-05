@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/marcus/td/internal/fsutil"
 	"github.com/marcus/td/internal/models"
 )
 
@@ -71,7 +72,13 @@ func Save(baseDir string, cfg *models.Config) error {
 		return err
 	}
 
-	return os.Rename(tmpName, configPath)
+	// fsutil.Rename retries transient Windows sharing violations so the .tmp
+	// file is not orphaned when another process briefly holds the target.
+	if err := fsutil.Rename(tmpName, configPath); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // withConfigLock serializes access to config.json using flock

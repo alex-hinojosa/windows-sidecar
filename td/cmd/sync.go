@@ -219,8 +219,9 @@ func runBootstrap(database *db.DB, client *syncclient.Client, state *db.SyncStat
 	// Close current DB before overwriting
 	database.Close()
 
-	// Backup existing DB
-	if err := copyFile(dbPath, backupPath); err != nil {
+	// Backup existing DB, including the WAL sidecars (the DB runs in WAL
+	// mode; committed data may still live in issues.db-wal at this point).
+	if err := backupDBFiles(dbPath, backupPath); err != nil {
 		reopened, reopenErr := db.Open(baseDir)
 		if reopenErr != nil {
 			return nil, fmt.Errorf("backup failed (%w) and reopen failed: %v", err, reopenErr)
@@ -228,9 +229,20 @@ func runBootstrap(database *db.DB, client *syncclient.Client, state *db.SyncStat
 		return reopened, fmt.Errorf("backup db: %w", err)
 	}
 
+	// Remove stale WAL sidecars before laying down the snapshot: replaying an
+	// old WAL against the freshly written database file would corrupt it.
+	if err := removeWALSidecars(dbPath); err != nil {
+		restoreOrWarn(backupPath, dbPath)
+		reopened, reopenErr := db.Open(baseDir)
+		if reopenErr != nil {
+			return nil, fmt.Errorf("clear wal sidecars failed (%w) and reopen failed: %v", err, reopenErr)
+		}
+		return reopened, fmt.Errorf("clear wal sidecars: %w", err)
+	}
+
 	// Write snapshot
 	if err := os.WriteFile(dbPath, snapshot.Data, 0644); err != nil {
-		os.Rename(backupPath, dbPath)
+		restoreOrWarn(backupPath, dbPath)
 		reopened, reopenErr := db.Open(baseDir)
 		if reopenErr != nil {
 			return nil, fmt.Errorf("write failed (%w) and reopen failed: %v", err, reopenErr)
@@ -241,7 +253,7 @@ func runBootstrap(database *db.DB, client *syncclient.Client, state *db.SyncStat
 	// Reopen and update sync_state
 	reopened, err := db.Open(baseDir)
 	if err != nil {
-		os.Rename(backupPath, dbPath)
+		restoreOrWarn(backupPath, dbPath)
 		reopened2, reopenErr := db.Open(baseDir)
 		if reopenErr != nil {
 			return nil, fmt.Errorf("reopen failed (%w) and restore reopen failed: %v", err, reopenErr)
@@ -257,7 +269,7 @@ func runBootstrap(database *db.DB, client *syncclient.Client, state *db.SyncStat
 	)
 	if err != nil {
 		reopened.Close()
-		os.Rename(backupPath, dbPath)
+		restoreOrWarn(backupPath, dbPath)
 		reopened2, reopenErr := db.Open(baseDir)
 		if reopenErr != nil {
 			return nil, fmt.Errorf("sync_state update failed (%w) and restore reopen failed: %v", err, reopenErr)
@@ -267,6 +279,62 @@ func runBootstrap(database *db.DB, client *syncclient.Client, state *db.SyncStat
 
 	fmt.Printf("Bootstrap complete (seq %d).\n", snapshot.SnapshotSeq)
 	return reopened, nil
+}
+
+// walSidecarSuffixes are the SQLite WAL-mode sidecar files that must travel
+// with the main database file.
+var walSidecarSuffixes = []string{"-wal", "-shm"}
+
+// backupDBFiles copies the database and its WAL sidecars to backupPath(+suffix).
+// Missing files (e.g. after a clean WAL checkpoint) are skipped.
+func backupDBFiles(dbPath, backupPath string) error {
+	if err := copyFile(dbPath, backupPath); err != nil {
+		return err
+	}
+	for _, suffix := range walSidecarSuffixes {
+		if err := copyFile(dbPath+suffix, backupPath+suffix); err != nil {
+			return fmt.Errorf("backup %s sidecar: %w", suffix, err)
+		}
+	}
+	return nil
+}
+
+// restoreDBFiles moves the backup (and its WAL sidecars) back into place.
+// Any sidecars left over from the failed bootstrap are removed first so a
+// stale WAL is never replayed against the restored database.
+func restoreDBFiles(backupPath, dbPath string) error {
+	var firstErr error
+	if err := removeWALSidecars(dbPath); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := os.Rename(backupPath, dbPath); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("restore db: %w", err)
+	}
+	for _, suffix := range walSidecarSuffixes {
+		if err := os.Rename(backupPath+suffix, dbPath+suffix); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = fmt.Errorf("restore %s sidecar: %w", suffix, err)
+		}
+	}
+	return firstErr
+}
+
+// restoreOrWarn restores the pre-snapshot backup and surfaces (rather than
+// silently discarding) any restore failure, pointing at the backup location.
+func restoreOrWarn(backupPath, dbPath string) {
+	if err := restoreDBFiles(backupPath, dbPath); err != nil {
+		output.Warning("restoring pre-snapshot backup failed: %v (backup preserved at %s)", err, backupPath)
+	}
+}
+
+// removeWALSidecars deletes the -wal/-shm files next to dbPath, ignoring
+// missing files.
+func removeWALSidecars(dbPath string) error {
+	for _, suffix := range walSidecarSuffixes {
+		if err := os.Remove(dbPath + suffix); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s sidecar: %w", suffix, err)
+		}
+	}
+	return nil
 }
 
 // copyFile copies src to dst, creating dst if it doesn't exist.

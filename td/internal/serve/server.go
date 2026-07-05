@@ -3,10 +3,14 @@ package serve
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -66,13 +70,23 @@ func (s *Server) Handler() http.Handler {
 
 	// Wrap order: outermost first when applied, so we apply innermost first.
 	// Final order (outermost to innermost):
-	//   recovery -> logging -> CORS -> auth -> handler
+	//   recovery -> logging -> CORS -> csrf -> auth -> handler
 	h = s.authMiddleware(h)
+	h = s.csrfMiddleware(h)
 	h = s.corsMiddleware(h)
 	h = s.loggingMiddleware(h)
 	h = s.recoveryMiddleware(h)
 
 	return h
+}
+
+// GenerateToken creates a cryptographically random bearer token (32 hex chars).
+func GenerateToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ListenAndServe starts the HTTP server on the configured address and port,
@@ -312,6 +326,87 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// csrfMiddleware rejects state-changing cross-site requests. Browsers attach
+// an Origin header to cross-origin (and most same-origin) unsafe requests;
+// non-browser clients (curl, SDKs) typically send none. Two checks apply to
+// unsafe methods (anything but GET/HEAD/OPTIONS):
+//
+//  1. If an Origin header is present it must be a localhost origin or the
+//     explicitly configured CORS origin. This stops browser pages on other
+//     origins from forging writes such as POST /v1/issues/{id}/approve.
+//  2. The Host header must resolve to localhost (or the configured bind
+//     address) to defeat DNS-rebinding attacks. The check is skipped when the
+//     server was explicitly bound to a non-loopback address, since the
+//     operator opted into network exposure and clients then connect with
+//     arbitrary host names.
+func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if origin := r.Header.Get("Origin"); origin != "" && !s.originAllowed(origin) {
+			WriteError(w, ErrForbidden, "cross-origin request rejected", http.StatusForbidden)
+			return
+		}
+
+		if isLoopbackBindAddr(s.config.Addr) && !s.hostAllowed(r.Host) {
+			WriteError(w, ErrForbidden, "invalid host header", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originAllowed reports whether the given Origin header value may perform
+// state-changing requests: localhost origins always may, plus the explicitly
+// configured CORS origin (or any origin when CORS is configured as "*").
+func (s *Server) originAllowed(origin string) bool {
+	if s.config.CORSOrigin == "*" {
+		return true
+	}
+	if s.config.CORSOrigin != "" && origin == s.config.CORSOrigin {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHostname(u.Hostname())
+}
+
+// hostAllowed reports whether the request Host header targets this server
+// legitimately (loopback, or the configured bind address).
+func (s *Server) hostAllowed(hostPort string) bool {
+	host := hostPort
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = h
+	}
+	if isLoopbackHostname(host) {
+		return true
+	}
+	return s.config.Addr != "" && strings.EqualFold(host, s.config.Addr)
+}
+
+// isLoopbackHostname reports whether host is localhost or a loopback IP.
+func isLoopbackHostname(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackBindAddr reports whether the configured bind address is loopback
+// (or empty, which net.Listen treats as all interfaces — keep the strict host
+// check only for the loopback/localhost defaults).
+func isLoopbackBindAddr(addr string) bool {
+	return addr == "" || isLoopbackHostname(addr)
+}
+
 // authMiddleware validates the Bearer token when the server is configured with
 // a token. GET /health is always exempt from authentication.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -340,7 +435,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if token != s.config.Token {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.config.Token)) != 1 {
 			WriteError(w, ErrUnauthorized, "invalid token", http.StatusUnauthorized)
 			return
 		}
