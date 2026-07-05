@@ -35,6 +35,9 @@ const manifestVersion = 1
 
 // LoadShellManifest loads the shell manifest from disk.
 // Returns an empty manifest (not error) if file doesn't exist or is corrupted.
+// Returns a nil manifest and an error if the read lock cannot be acquired:
+// treating a lock timeout as "empty" would let a subsequent AddShell/Save
+// clobber every other instance's shells with the empty list.
 func LoadShellManifest(path string) (*ShellManifest, error) {
 	m := &ShellManifest{
 		Version: manifestVersion,
@@ -45,8 +48,8 @@ func LoadShellManifest(path string) (*ShellManifest, error) {
 	// Acquire shared lock for reading
 	lockFile, err := acquireManifestLock(path, false)
 	if err != nil {
-		slog.Debug("manifest: lock failed, returning empty", "err", err)
-		return m, nil
+		slog.Warn("manifest: lock failed", "err", err)
+		return nil, fmt.Errorf("acquire manifest read lock: %w", err)
 	}
 	defer releaseManifestLock(lockFile)
 

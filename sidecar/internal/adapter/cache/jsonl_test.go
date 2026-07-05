@@ -302,6 +302,211 @@ func TestHeadReader_Offset(t *testing.T) {
 	}
 }
 
+func TestIncrementalReader_CRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+
+	// CRLF line endings: each terminator is 2 bytes. Offsets computed as
+	// len(line)+1 would drift 1 byte per line and resume mid-line.
+	content := "line1\r\nline2\r\nline3\r\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewIncrementalReader(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	line, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(line) != "line1" {
+		t.Errorf("expected line1 (\\r stripped), got %q", line)
+	}
+	if r.Offset() != 7 { // "line1" + CRLF = 7 bytes
+		t.Errorf("expected offset 7 after CRLF line, got %d", r.Offset())
+	}
+
+	line, err = r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(line) != "line2" {
+		t.Errorf("expected line2, got %q", line)
+	}
+	resumeOffset := r.Offset()
+	if resumeOffset != 14 {
+		t.Errorf("expected offset 14 after two CRLF lines, got %d", resumeOffset)
+	}
+
+	// Resume from the recorded offset: must land exactly on line3.
+	r2, err := NewIncrementalReader(path, resumeOffset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := r2.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	line, err = r2.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(line) != "line3" {
+		t.Errorf("resume at offset %d: expected line3, got %q", resumeOffset, line)
+	}
+	if r2.Offset() != int64(len(content)) {
+		t.Errorf("expected final offset %d, got %d", len(content), r2.Offset())
+	}
+	if _, err := r2.Next(); err != io.EOF {
+		t.Errorf("expected EOF, got %v", err)
+	}
+}
+
+func TestIncrementalReader_CRLFAppendResume(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+
+	initial := "one\r\ntwo\r\n"
+	if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First pass: consume everything, record the offset (as the msg caches do).
+	r, err := NewIncrementalReader(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := r.Next(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	offset := r.Offset()
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if offset != int64(len(initial)) {
+		t.Fatalf("expected offset %d after full read, got %d", len(initial), offset)
+	}
+
+	// Append new CRLF lines, then resume from the recorded offset.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("three\r\nfour\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r2, err := NewIncrementalReader(path, offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := r2.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	var lines []string
+	for {
+		line, err := r2.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(line))
+	}
+	if len(lines) != 2 || lines[0] != "three" || lines[1] != "four" {
+		t.Errorf("resume after append: expected [three four], got %v", lines)
+	}
+}
+
+func TestIncrementalReader_NoTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+
+	content := "line1\nline2"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewIncrementalReader(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	if _, err := r.Next(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(line) != "line2" {
+		t.Errorf("expected line2, got %q", line)
+	}
+	// Offset must not overshoot EOF when the final line has no terminator.
+	if r.Offset() != int64(len(content)) {
+		t.Errorf("expected offset %d (EOF), got %d", len(content), r.Offset())
+	}
+}
+
+func TestHeadReader_CRLFOffset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+
+	content := "line1\r\nline2\r\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewHeadReader(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	if _, err := r.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if r.Offset() != 7 { // "line1" + CRLF
+		t.Errorf("expected offset 7, got %d", r.Offset())
+	}
+	if _, err := r.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if r.Offset() != 14 {
+		t.Errorf("expected offset 14, got %d", r.Offset())
+	}
+}
+
 func TestHeadReader_FewerLinesThanMax(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.jsonl")

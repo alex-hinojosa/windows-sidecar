@@ -493,12 +493,10 @@ func (a *Adapter) parseSessionMetadataFull(path string) (*SessionMetadata, int64
 	modelTokens := make(map[string]modelTokenEntry)
 	var bytesRead int64
 	var currentModel string
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1
-
-		a.processMetadataLine(line, meta, modelCounts, modelTokens, &currentModel)
+		a.processMetadataLine(scanner.Bytes(), meta, modelCounts, modelTokens, &currentModel)
 	}
 
 	a.finalizeMetadata(meta, modelCounts)
@@ -551,15 +549,13 @@ func (a *Adapter) parseSessionMetadataIncremental(path string, base *SessionMeta
 	scanner.Buffer(buf, 10*1024*1024)
 
 	bytesRead := offset
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 	var currentModel string
 	if meta.PrimaryModel != "" {
 		currentModel = meta.PrimaryModel
 	}
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1
-
-		a.processMetadataLine(line, meta, modelCounts, modelTokens, &currentModel)
+		a.processMetadataLine(scanner.Bytes(), meta, modelCounts, modelTokens, &currentModel)
 	}
 
 	a.finalizeMetadata(meta, modelCounts)
@@ -769,12 +765,10 @@ func (a *Adapter) parseMessagesFull(path string, info os.FileInfo) ([]adapter.Me
 	buf := cache.GetScannerBuffer()
 	defer cache.PutScannerBuffer(buf)
 	scanner.Buffer(buf, 10*1024*1024)
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1
-
-		a.processMessageLine(line, &messages, toolUseRefs, pendingRefs)
+		a.processMessageLine(scanner.Bytes(), &messages, toolUseRefs, pendingRefs)
 	}
 
 	if err := scanner.Err(); err != nil {

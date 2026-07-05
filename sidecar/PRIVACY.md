@@ -20,7 +20,7 @@ Reads conversation history from local agent data directories to display in the C
 - **Kiro** — `~/.kiro/data.sqlite3` and platform-specific fallbacks (`~/Library/Application Support/kiro-cli/`, `$XDG_DATA_HOME/kiro-cli/`, legacy `~/.amazonq/`)
 - **OpenCode** — `~/Library/Application Support/opencode/storage/` (macOS), `$XDG_DATA_HOME/opencode/storage/` (Linux)
 - **Pi** — per-project session directories (JSONL, read with incremental parsing)
-- **Warp** — `~/Library/Group Containers/2BBY89MBSN.dev.warp/...` (macOS), `$XDG_STATE_HOME/warp-terminal/warp.sqlite` (Linux), `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite` (Windows) — read via `go-sqlite3`
+- **Warp** — `~/Library/Group Containers/2BBY89MBSN.dev.warp/...` (macOS), `$XDG_STATE_HOME/warp-terminal/warp.sqlite` (Linux), `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite` (Windows) — read via `modernc.org/sqlite`
 
 Parsed data includes session metadata (IDs, names, timestamps, duration), messages (text, tool calls, thinking blocks), token counts, model names, and estimated costs. These files are **read-only**. Sidecar never writes to agent data directories.
 

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/marcus/sidecar/internal/adapter"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // pure-Go driver: works with CGO_ENABLED=0 (Windows builds)
 )
 
 // ansiRegex matches ANSI escape codes
@@ -494,9 +494,11 @@ func (a *Adapter) getDB() (*sql.DB, error) {
 		a.db = nil
 	}
 
-	// Open new connection with read-only mode and WAL mode
-	connStr := a.dbPath + "?mode=ro&_journal_mode=WAL"
-	db, err := sql.Open("sqlite3", connStr)
+	// Open new connection in read-only mode. The "file:" URI form is required
+	// for modernc.org/sqlite to honor mode=ro (a bare path DSN silently opens
+	// read-write). WAL databases are readable without setting journal_mode.
+	connStr := "file:" + filepath.ToSlash(a.dbPath) + "?mode=ro"
+	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -135,6 +136,40 @@ func GenerateSingleEnvCommand(overrides map[string]string) string {
 	return strings.Join(parts, "; ")
 }
 
+// GenerateSingleEnvCommandPowerShell returns a single PowerShell command that
+// applies all env overrides. Assigning $null to $env:NAME removes the
+// variable, which is PowerShell's equivalent of unset.
+func GenerateSingleEnvCommandPowerShell(overrides map[string]string) string {
+	var parts []string
+	for key, value := range overrides {
+		if value == "" {
+			parts = append(parts, "$env:"+key+" = $null")
+		} else {
+			parts = append(parts, "$env:"+key+" = "+psQuote(value))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// GenerateSingleEnvCommandForPane returns the env-override command in the
+// syntax of the shell running inside a freshly created mux pane: PowerShell on
+// Windows (psmux panes default to PowerShell), POSIX sh elsewhere.
+func GenerateSingleEnvCommandForPane(overrides map[string]string) string {
+	if runtime.GOOS == "windows" {
+		return GenerateSingleEnvCommandPowerShell(overrides)
+	}
+	return GenerateSingleEnvCommand(overrides)
+}
+
+// tdSessionEnvCommand returns the pane-shell command that sets TD_SESSION_ID
+// for td session tracking (PowerShell on Windows, POSIX sh elsewhere).
+func tdSessionEnvCommand(sessionName string) string {
+	if runtime.GOOS == "windows" {
+		return "$env:TD_SESSION_ID = " + psQuote(sessionName)
+	}
+	return "export TD_SESSION_ID=" + shellQuote(sessionName)
+}
+
 // ApplyEnvOverrides applies overrides to an existing environment slice.
 // Returns a new slice with overrides applied.
 func ApplyEnvOverrides(baseEnv []string, overrides map[string]string) []string {
@@ -169,4 +204,10 @@ func ApplyEnvOverrides(baseEnv []string, overrides map[string]string) []string {
 func shellQuote(s string) string {
 	// Use single quotes and escape any single quotes in the string
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// psQuote quotes a string as a PowerShell single-quoted literal
+// (embedded single quotes are doubled).
+func psQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

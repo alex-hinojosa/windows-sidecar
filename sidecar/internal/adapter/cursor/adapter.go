@@ -285,7 +285,9 @@ func (a *Adapter) workspacePath(projectRoot string) string {
 
 // readSessionMeta reads the session metadata from store.db.
 func (a *Adapter) readSessionMeta(dbPath string) (*SessionMeta, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	// The "file:" URI form is required for modernc.org/sqlite to honor mode=ro
+	// (a bare path DSN silently opens read-write).
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +335,9 @@ func (a *Adapter) findSessionDB(sessionID string) string {
 
 // parseMessages parses all messages from a session's store.db.
 func (a *Adapter) parseMessages(dbPath string) ([]adapter.Message, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	// The "file:" URI form is required for modernc.org/sqlite to honor mode=ro
+	// (a bare path DSN silently opens read-write).
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
 	if err != nil {
 		return nil, err
 	}

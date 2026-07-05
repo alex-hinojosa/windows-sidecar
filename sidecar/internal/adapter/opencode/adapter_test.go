@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/marcus/sidecar/internal/adapter"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestNew(t *testing.T) {
@@ -68,7 +68,7 @@ func createSQLiteFixture(t *testing.T) (dbPath string, projectPath string, sessi
 	}
 	dbPath = filepath.Join(tmpDir, "opencode.db")
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -160,6 +160,16 @@ func TestSQLiteStorageMode_DetectSessionsMessages(t *testing.T) {
 		projectIndex: make(map[string]*Project),
 		metaCache:    make(map[string]sessionMetaCacheEntry),
 	}
+	// Close the persistent DB connection so TempDir cleanup can delete the
+	// db file on Windows (open handles block deletion there).
+	t.Cleanup(func() {
+		a.dbMu.Lock()
+		if a.db != nil {
+			_ = a.db.Close()
+			a.db = nil
+		}
+		a.dbMu.Unlock()
+	})
 
 	found, err := a.Detect(projectPath)
 	if err != nil {

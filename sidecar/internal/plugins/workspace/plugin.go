@@ -470,7 +470,13 @@ func (p *Plugin) Init(ctx *plugin.Context) error {
 		p.ctx.Logger.Warn("failed to resolve project dir for manifest", "error", err)
 	} else {
 		manifestPath := filepath.Join(projDir, "shells.json")
-		p.shellManifest, _ = LoadShellManifest(manifestPath)
+		manifest, mErr := LoadShellManifest(manifestPath)
+		if mErr != nil {
+			// Nil manifest disables shell persistence for this session rather
+			// than risking a save that clobbers other instances' shells.
+			p.ctx.Logger.Warn("failed to load shell manifest; shell persistence disabled", "error", mErr)
+		}
+		p.shellManifest = manifest
 	}
 
 	// Stop any previous watcher (important for project switching)

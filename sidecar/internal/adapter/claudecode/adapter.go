@@ -334,10 +334,10 @@ func (a *Adapter) parseMessagesFull(path string, info os.FileInfo) ([]adapter.Me
 	buf := cache.GetScannerBuffer()
 	defer cache.PutScannerBuffer(buf)
 	scanner.Buffer(buf, 10*1024*1024)
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1 // +1 for newline
 
 		msg, msgType, ok := a.parseMessageLine(line)
 		if !ok {
@@ -637,12 +637,53 @@ func (a *Adapter) projectDirPath(projectRoot string) string {
 	if err != nil {
 		absPath = projectRoot
 	}
-	// Convert /Users/foo/code/github.com/my_project to -Users-foo-code-github-com-my-project
-	// Claude Code replaces "/", ".", and "_" with "-"
-	hash := strings.ReplaceAll(absPath, "/", "-")
-	hash = strings.ReplaceAll(hash, ".", "-")
-	hash = strings.ReplaceAll(hash, "_", "-")
-	return filepath.Join(a.projectsDir, hash)
+	return filepath.Join(a.projectsDir, encodeProjectPath(absPath))
+}
+
+// encodeProjectPath converts an absolute project path to Claude Code's encoded
+// project directory name. Claude Code replaces "/", ".", and "_" with "-", and
+// on Windows additionally "\" and ":".
+// Examples:
+//
+//	/Users/foo/code/github.com/my_project -> -Users-foo-code-github-com-my-project
+//	C:\snapdragon                         -> C--snapdragon
+//
+// (verified against real ~/.claude/projects dirs on Windows).
+// See: https://github.com/anthropics/claude-code/issues/19972
+func encodeProjectPath(absPath string) string {
+	return strings.NewReplacer(
+		"/", "-",
+		".", "-",
+		"_", "-",
+		"\\", "-",
+		":", "-",
+	).Replace(absPath)
+}
+
+// isWindowsEncodedName reports whether an encoded project directory name looks
+// like an encoded Windows path (e.g. "C--snapdragon" from `C:\snapdragon`).
+// POSIX-encoded names always start with "-" (from the leading "/"), so the two
+// forms never collide.
+func isWindowsEncodedName(name string) bool {
+	if len(name) < 3 || name[1] != '-' || name[2] != '-' {
+		return false
+	}
+	c := name[0]
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// decodeProjectDirName converts an encoded project directory name back to a
+// best-effort absolute path. The encoding is lossy (a "-" in the original path
+// is indistinguishable from an encoded separator), but re-encoding the result
+// with encodeProjectPath always round-trips to the same directory name, which
+// is what session lookup requires.
+func decodeProjectDirName(name string) string {
+	if isWindowsEncodedName(name) {
+		// C--snapdragon -> C:\snapdragon
+		return name[:1] + `:\` + strings.ReplaceAll(name[3:], "-", `\`)
+	}
+	// -Users-foo-code-myrepo -> /Users/foo/code/myrepo
+	return strings.ReplaceAll(name, "-", "/")
 }
 
 // DiscoverRelatedProjectDirs scans ~/.claude/projects/ for directories that appear
@@ -672,18 +713,16 @@ func (a *Adapter) DiscoverRelatedProjectDirs(mainWorktreePath string) ([]string,
 	var related []string
 	// Encode the main path to find its pattern in directory names
 	// e.g., /Users/foo/code/github.com/my_repo -> -Users-foo-code-github-com-my-repo
-	// Claude Code replaces "/", ".", and "_" with "-"
+	// or C:\snapdragon -> C--snapdragon
 	// See: https://github.com/anthropics/claude-code/issues/19972
-	encodedMain := strings.ReplaceAll(absMain, "/", "-")
-	encodedMain = strings.ReplaceAll(encodedMain, ".", "-")
-	encodedMain = strings.ReplaceAll(encodedMain, "_", "-")
+	encodedMain := encodeProjectPath(absMain)
 
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, "-") {
+		if !strings.HasPrefix(name, "-") && !isWindowsEncodedName(name) {
 			continue
 		}
 
@@ -691,9 +730,7 @@ func (a *Adapter) DiscoverRelatedProjectDirs(mainWorktreePath string) ([]string,
 		// 1. Exactly match the main repo encoded path
 		// 2. Start with the main repo encoded path followed by hyphen (worktree suffix)
 		if name == encodedMain || strings.HasPrefix(name, encodedMain+"-") {
-			// Decode: -Users-foo-code-myrepo -> /Users/foo/code/myrepo
-			decoded := strings.ReplaceAll(name, "-", "/")
-			related = append(related, decoded)
+			related = append(related, decodeProjectDirName(name))
 		}
 	}
 
@@ -760,12 +797,10 @@ func (a *Adapter) parseSessionMetadataFull(path string) (*SessionMetadata, int64
 	modelCounts := make(map[string]int)
 	modelTokens := make(map[string]modelTokenEntry)
 	var bytesRead int64
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1 // +1 for newline
-
-		a.processMetadataLine(line, meta, modelCounts, modelTokens)
+		a.processMetadataLine(scanner.Bytes(), meta, modelCounts, modelTokens)
 	}
 
 	a.finalizeMetadataCost(meta, modelCounts, modelTokens)
@@ -822,11 +857,9 @@ func (a *Adapter) parseSessionMetadataIncremental(path string, base *SessionMeta
 	scanner.Buffer(buf, 10*1024*1024)
 
 	bytesRead := offset
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1
-
-		a.processMetadataLine(line, meta, modelCounts, modelTokens)
+		a.processMetadataLine(scanner.Bytes(), meta, modelCounts, modelTokens)
 	}
 
 	a.finalizeMetadataCost(meta, modelCounts, modelTokens)

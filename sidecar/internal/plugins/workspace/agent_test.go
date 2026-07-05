@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"encoding/base64"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1116,7 +1118,20 @@ func TestWriteAgentLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorktreeDir failed: %v", err)
 	}
+	// On Windows the launcher is a PowerShell script (panes run PowerShell);
+	// elsewhere it is a bash script.
+	isWindows := runtime.GOOS == "windows"
 	expectedLauncherPath := filepath.Join(wtDir, "start.sh")
+	launchPrefix := "bash '"
+	if isWindows {
+		expectedLauncherPath = filepath.Join(wtDir, "start.ps1")
+		shell := "powershell"
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			shell = "pwsh"
+		}
+		launchPrefix = shell + " -NoProfile -ExecutionPolicy Bypass -File '"
+	}
+	wantCmd := launchPrefix + expectedLauncherPath + "'"
 
 	p := &Plugin{
 		ctx: &plugin.Context{
@@ -1130,35 +1145,30 @@ func TestWriteAgentLauncher(t *testing.T) {
 		agentType AgentType
 		baseCmd   string
 		prompt    string
-		wantCmd   string
 	}{
 		{
 			name:      "claude with simple prompt",
 			agentType: AgentClaude,
 			baseCmd:   "claude",
 			prompt:    "Task: fix bug",
-			wantCmd:   "bash '" + expectedLauncherPath + "'",
 		},
 		{
 			name:      "claude with complex markdown",
 			agentType: AgentClaude,
 			baseCmd:   "claude",
 			prompt:    "Task: implement feature\n\n```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n\nDon't break the user's code!",
-			wantCmd:   "bash '" + expectedLauncherPath + "'",
 		},
 		{
 			name:      "aider uses --message flag",
 			agentType: AgentAider,
 			baseCmd:   "aider --yes",
 			prompt:    "Task: fix bug",
-			wantCmd:   "bash '" + expectedLauncherPath + "'",
 		},
 		{
 			name:      "amp pipes via stdin",
 			agentType: AgentAmp,
 			baseCmd:   "amp --dangerously-allow-all",
 			prompt:    "Task: fix bug",
-			wantCmd:   "bash '" + expectedLauncherPath + "'",
 		},
 	}
 
@@ -1169,8 +1179,8 @@ func TestWriteAgentLauncher(t *testing.T) {
 				t.Fatalf("writeAgentLauncher failed: %v", err)
 			}
 
-			if cmd != tt.wantCmd {
-				t.Errorf("command = %q, want %q", cmd, tt.wantCmd)
+			if cmd != wantCmd {
+				t.Errorf("command = %q, want %q", cmd, wantCmd)
 			}
 
 			// Verify launcher script exists and is executable
@@ -1178,36 +1188,65 @@ func TestWriteAgentLauncher(t *testing.T) {
 			if err != nil {
 				t.Fatalf("launcher script not created: %v", err)
 			}
-			if runtime.GOOS != "windows" && launcherInfo.Mode()&0100 == 0 {
+			if !isWindows && launcherInfo.Mode()&0100 == 0 {
 				t.Error("launcher script is not executable")
 			}
 
-			// Verify the script contains the prompt embedded in a heredoc
 			scriptContent, err := os.ReadFile(expectedLauncherPath)
 			if err != nil {
 				t.Fatalf("failed to read launcher script: %v", err)
 			}
 			scriptStr := string(scriptContent)
 
-			// Check that the heredoc delimiter is present
-			if !strings.Contains(scriptStr, "SIDECAR_PROMPT_EOF") {
-				t.Error("launcher script should contain heredoc delimiter SIDECAR_PROMPT_EOF")
-			}
+			if isWindows {
+				// The prompt is embedded base64-encoded so PowerShell never
+				// interprets its content.
+				encoded := base64.StdEncoding.EncodeToString([]byte(tt.prompt))
+				if !strings.Contains(scriptStr, "FromBase64String('"+encoded+"')") {
+					t.Errorf("launcher script should embed base64 prompt, got:\n%s", scriptStr)
+				}
+				if !strings.Contains(scriptStr, "$SidecarPrompt") {
+					t.Error("launcher script should reference $SidecarPrompt")
+				}
+				// Script must clean up after itself like the bash launcher.
+				if !strings.Contains(scriptStr, "Remove-Item -LiteralPath") {
+					t.Error("launcher script should remove itself")
+				}
+				switch tt.agentType {
+				case AgentAider:
+					if !strings.Contains(scriptStr, tt.baseCmd+" --message $SidecarPrompt") {
+						t.Errorf("aider script should use --message, got:\n%s", scriptStr)
+					}
+				case AgentAmp:
+					if !strings.Contains(scriptStr, "$SidecarPrompt | "+tt.baseCmd) {
+						t.Errorf("amp script should pipe prompt via stdin, got:\n%s", scriptStr)
+					}
+				default:
+					if !strings.Contains(scriptStr, tt.baseCmd+" $SidecarPrompt") {
+						t.Errorf("script should pass prompt positionally, got:\n%s", scriptStr)
+					}
+				}
+			} else {
+				// Check that the heredoc delimiter is present
+				if !strings.Contains(scriptStr, "SIDECAR_PROMPT_EOF") {
+					t.Error("launcher script should contain heredoc delimiter SIDECAR_PROMPT_EOF")
+				}
 
-			// Check that the prompt content is embedded in the script
-			if !strings.Contains(scriptStr, tt.prompt) {
-				t.Errorf("launcher script should contain prompt %q", tt.prompt)
-			}
+				// Check that the prompt content is embedded in the script
+				if !strings.Contains(scriptStr, tt.prompt) {
+					t.Errorf("launcher script should contain prompt %q", tt.prompt)
+				}
 
-			// Check that the script starts with shebang
-			if !strings.HasPrefix(scriptStr, "#!/bin/bash") {
-				t.Error("launcher script should start with #!/bin/bash")
-			}
+				// Check that the script starts with shebang
+				if !strings.HasPrefix(scriptStr, "#!/bin/bash") {
+					t.Error("launcher script should start with #!/bin/bash")
+				}
 
-			// Amp-specific: verify pipe syntax (prompt piped to command via stdin)
-			if tt.agentType == AgentAmp {
-				if !strings.Contains(scriptStr, "SIDECAR_PROMPT_EOF' | "+tt.baseCmd) {
-					t.Errorf("amp script should pipe prompt to command via stdin, got:\n%s", scriptStr)
+				// Amp-specific: verify pipe syntax (prompt piped to command via stdin)
+				if tt.agentType == AgentAmp {
+					if !strings.Contains(scriptStr, "SIDECAR_PROMPT_EOF' | "+tt.baseCmd) {
+						t.Errorf("amp script should pipe prompt to command via stdin, got:\n%s", scriptStr)
+					}
 				}
 			}
 

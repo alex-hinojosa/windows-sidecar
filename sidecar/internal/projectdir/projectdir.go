@@ -109,6 +109,17 @@ func resolveWithBase(base, projectRoot string) (string, error) {
 	return "", fmt.Errorf("could not allocate slug for %q (tried 99 suffixes)", projectRoot)
 }
 
+// windowsReservedNames are device names that cannot be used as file or
+// directory names on Windows (case-insensitive, even with an extension,
+// e.g. both "con" and "con.txt" are invalid).
+var windowsReservedNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
 // sanitizeSlug removes characters that are problematic in directory names.
 func sanitizeSlug(s string) string {
 	// Remove forward and back slashes.
@@ -124,9 +135,25 @@ func sanitizeSlug(s string) string {
 	}
 	s = b.String()
 
+	// Windows silently strips trailing dots and spaces from directory names,
+	// which would make the created dir not match the slug. Trim them here
+	// (applied on all platforms so slugs stay deterministic).
+	s = strings.TrimRight(s, ". ")
+
 	// Replace empty, ".", ".." with underscore.
 	if s == "" || s == "." || s == ".." {
 		return "_"
+	}
+
+	// Prefix Windows reserved device names (nul, con, com1, ...) so the
+	// directory can actually be created. The extension does not un-reserve
+	// a name ("con.backup" is still invalid), so check the pre-dot base.
+	base := s
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		base = s[:i]
+	}
+	if windowsReservedNames[strings.ToLower(base)] {
+		return "_" + s
 	}
 	return s
 }

@@ -256,11 +256,10 @@ func (a *Adapter) parseMessagesFull(path, sessionID string, info os.FileInfo) ([
 	buf := cache.GetScannerBuffer()
 	defer cache.PutScannerBuffer(buf)
 	scanner.Buffer(buf, 10*1024*1024)
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1
-		a.processMessageRecord(line, state)
+		a.processMessageRecord(scanner.Bytes(), state)
 	}
 
 	if err := scanner.Err(); err != nil {

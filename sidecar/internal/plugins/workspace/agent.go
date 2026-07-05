@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,15 +111,32 @@ var (
 	tmuxPaneIDsAreAmbiguous bool
 )
 
+// tmuxUsesAmbiguousPaneIDs reports whether the tmux binary's pane IDs are NOT
+// globally unique (psmux scopes them per session), in which case send/capture
+// must target sessions rather than pane IDs to avoid crossing sessions.
+//
+// Detection is security-relevant, so it fails CLOSED: only a positively
+// identified real tmux gets pane-id mode. Real tmux rejects --help with its
+// "usage: tmux ..." banner (non-zero exit); psmux prints a help page
+// containing "psmux"/"tmux alternative" markers. Anything else (probe error,
+// changed banner, unknown binary) defaults to session-target mode, which is
+// correct on psmux and merely coarser on real tmux.
 func tmuxUsesAmbiguousPaneIDs() bool {
 	tmuxTargetScopeOnce.Do(func() {
 		output, err := exec.Command("tmux", "--help").CombinedOutput()
-		if err != nil {
-			return
-		}
 		help := strings.ToLower(string(output))
-		tmuxPaneIDsAreAmbiguous = strings.Contains(help, "psmux") ||
-			strings.Contains(help, "tmux alternative")
+		switch {
+		case strings.Contains(help, "psmux") || strings.Contains(help, "tmux alternative"):
+			// Known psmux banner: pane IDs are session-scoped.
+			tmuxPaneIDsAreAmbiguous = true
+		case err != nil && strings.Contains(help, "usage: tmux"):
+			// Real tmux: --help exits non-zero and prints its usage banner.
+			// Pane IDs (%N) are globally unique there.
+			tmuxPaneIDsAreAmbiguous = false
+		default:
+			// Uncertain: fail closed and use session-target mode.
+			tmuxPaneIDsAreAmbiguous = true
+		}
 	})
 	return tmuxPaneIDsAreAmbiguous
 }
@@ -405,12 +424,13 @@ func (p *Plugin) StartAgent(wt *Worktree, agentType AgentType) tea.Cmd {
 			strconv.Itoa(tmuxHistoryLimit)).Run()
 
 		// Set TD_SESSION_ID environment variable for td session tracking
-		envCmd := fmt.Sprintf("export TD_SESSION_ID=%s", shellQuote(sessionName))
+		// (syntax matches the pane shell: PowerShell on Windows, POSIX sh elsewhere)
+		envCmd := tdSessionEnvCommand(sessionName)
 		_ = exec.Command("tmux", "send-keys", "-t", sessionName, envCmd, "Enter").Run()
 
 		// Apply environment isolation to prevent conflicts (GOWORK, etc.)
 		envOverrides := BuildEnvOverrides(p.ctx.WorkDir)
-		if envCmd := GenerateSingleEnvCommand(envOverrides); envCmd != "" {
+		if envCmd := GenerateSingleEnvCommandForPane(envOverrides); envCmd != "" {
 			_ = exec.Command("tmux", "send-keys", "-t", sessionName, envCmd, "Enter").Run()
 		}
 
@@ -605,6 +625,10 @@ func (p *Plugin) writeAgentLauncher(worktreePath string, agentType AgentType, ba
 	if err != nil {
 		return "", fmt.Errorf("resolve worktree dir: %w", err)
 	}
+	if runtime.GOOS == "windows" {
+		// Windows panes run PowerShell, not bash: write a PowerShell launcher.
+		return writeAgentLauncherPowerShell(wtDir, agentType, baseCmd, prompt)
+	}
 	launcherFile := filepath.Join(wtDir, "start.sh")
 
 	// Build shell profile sourcing command.
@@ -673,6 +697,52 @@ rm -f %q
 	return "bash " + shellQuote(launcherFile), nil
 }
 
+// writeAgentLauncherPowerShell writes a PowerShell launcher script for Windows
+// panes (psmux panes run PowerShell, so the bash/heredoc launcher cannot work
+// there). The prompt is embedded base64-encoded, which sidesteps every
+// PowerShell quoting/expansion edge case (here-string terminators, backticks,
+// $variables, quotes) the same way the quoted heredoc does for bash.
+// The script deletes itself after the agent exits, matching the bash launcher.
+func writeAgentLauncherPowerShell(wtDir string, agentType AgentType, baseCmd, prompt string) (string, error) {
+	launcherFile := filepath.Join(wtDir, "start.ps1")
+	encoded := base64.StdEncoding.EncodeToString([]byte(prompt))
+
+	var invoke string
+	switch agentType {
+	case AgentAider:
+		// aider uses --message flag
+		invoke = baseCmd + " --message $SidecarPrompt"
+	case AgentOpenCode:
+		// opencode uses 'run' subcommand
+		invoke = baseCmd + " run $SidecarPrompt"
+	case AgentAmp:
+		// amp requires piping via stdin, does not accept positional args
+		invoke = "$SidecarPrompt | " + baseCmd
+	default:
+		// Most agents (claude, codex, gemini, cursor) take prompt as positional argument
+		invoke = baseCmd + " $SidecarPrompt"
+	}
+
+	script := fmt.Sprintf(`# Sidecar agent launcher (auto-generated)
+$SidecarPrompt = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%s'))
+%s
+Remove-Item -LiteralPath %s -Force -ErrorAction SilentlyContinue
+`, encoded, invoke, psQuote(launcherFile))
+
+	if err := os.WriteFile(launcherFile, []byte(script), 0700); err != nil {
+		return "", err
+	}
+
+	// Launch through an explicit PowerShell so a restrictive execution policy
+	// cannot block the script. Prefer pwsh (PowerShell 7) when available,
+	// matching setup.go / doctor conventions.
+	shell := "powershell"
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		shell = "pwsh"
+	}
+	return shell + " -NoProfile -ExecutionPolicy Bypass -File " + psQuote(launcherFile), nil
+}
+
 // getAgentCommandWithContext returns the agent command with optional task context (legacy, no skip perms).
 func (p *Plugin) getAgentCommandWithContext(agentType AgentType, wt *Worktree) string {
 	return p.buildAgentCommand(agentType, wt, false, nil)
@@ -721,12 +791,13 @@ func (p *Plugin) StartAgentWithOptions(wt *Worktree, agentType AgentType, skipPe
 			strconv.Itoa(tmuxHistoryLimit)).Run()
 
 		// Set TD_SESSION_ID environment variable for td session tracking
-		tdEnvCmd := fmt.Sprintf("export TD_SESSION_ID=%s", shellQuote(sessionName))
+		// (syntax matches the pane shell: PowerShell on Windows, POSIX sh elsewhere)
+		tdEnvCmd := tdSessionEnvCommand(sessionName)
 		_ = exec.Command("tmux", "send-keys", "-t", sessionName, tdEnvCmd, "Enter").Run()
 
 		// Apply environment isolation to prevent conflicts (GOWORK, etc.)
 		envOverrides := BuildEnvOverrides(p.ctx.WorkDir)
-		if envCmd := GenerateSingleEnvCommand(envOverrides); envCmd != "" {
+		if envCmd := GenerateSingleEnvCommandForPane(envOverrides); envCmd != "" {
 			_ = exec.Command("tmux", "send-keys", "-t", sessionName, envCmd, "Enter").Run()
 		}
 
@@ -1171,6 +1242,13 @@ func capturePaneDirectWithJoin(sessionName string, joinWrapped bool) (string, er
 // Returns map of session name to output.
 // If there are 0-1 active sessions, returns empty map to signal caller should use direct capture.
 func batchCaptureActiveSessions() (map[string]string, error) {
+	// The batch path shells out to `bash -c`, which is a POSIX-only
+	// optimization: on Windows it would spawn WSL bash (or fail) every poll.
+	// Signal the caller to use direct capture instead.
+	if runtime.GOOS == "windows" {
+		return nil, nil
+	}
+
 	// Get list of recently-polled sessions
 	activeSessions := globalActiveRegistry.getActiveSessions()
 

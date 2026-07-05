@@ -66,14 +66,23 @@ func BuildCommitURL(info *GitHubInfo, hash string) string {
 }
 
 // openInBrowser opens the URL in the default browser.
+// Only http(s) URLs are launched: the URL can derive from untrusted input
+// (e.g. `git remote get-url origin`), so it must never reach a shell or a
+// non-URL protocol handler.
 func openInBrowser(url string) tea.Cmd {
 	return func() tea.Msg {
+		if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+			return app.ToastMsg{Message: "Refusing to open non-http(s) URL", Duration: 3 * time.Second, IsError: true}
+		}
 		var cmd *exec.Cmd
 		switch runtime.GOOS {
 		case "darwin":
 			cmd = exec.Command("open", url)
 		case "windows":
-			cmd = exec.Command("cmd", "/c", "start", url)
+			// Never use `cmd /c start <url>` here: cmd.exe re-parses the
+			// argument, so metacharacters like "&" in the URL become command
+			// injection. rundll32 receives the URL as a plain argv element.
+			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 		case "linux":
 			cmd = exec.Command("xdg-open", url)
 		default:

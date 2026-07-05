@@ -3,7 +3,9 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -238,6 +240,68 @@ func TestShellQuote(t *testing.T) {
 		result := shellQuote(tc.input)
 		if result != tc.expected {
 			t.Errorf("shellQuote(%q) = %q, expected %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestPSQuote(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"simple", "'simple'"},
+		{"with spaces", "'with spaces'"},
+		{"with'quote", "'with''quote'"},
+		{"$notExpanded", "'$notExpanded'"},
+	}
+
+	for _, tc := range tests {
+		result := psQuote(tc.input)
+		if result != tc.expected {
+			t.Errorf("psQuote(%q) = %q, expected %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestGenerateSingleEnvCommandPowerShell(t *testing.T) {
+	// Single set.
+	cmd := GenerateSingleEnvCommandPowerShell(map[string]string{"GOWORK": "off"})
+	if cmd != "$env:GOWORK = 'off'" {
+		t.Errorf("set command = %q, want %q", cmd, "$env:GOWORK = 'off'")
+	}
+
+	// Single unset (assigning $null removes an env var in PowerShell).
+	cmd = GenerateSingleEnvCommandPowerShell(map[string]string{"GOFLAGS": ""})
+	if cmd != "$env:GOFLAGS = $null" {
+		t.Errorf("unset command = %q, want %q", cmd, "$env:GOFLAGS = $null")
+	}
+
+	// Mixed: both statements present, joined with "; ".
+	cmd = GenerateSingleEnvCommandPowerShell(map[string]string{"GOWORK": "off", "GOFLAGS": ""})
+	if !strings.Contains(cmd, "$env:GOWORK = 'off'") || !strings.Contains(cmd, "$env:GOFLAGS = $null") {
+		t.Errorf("mixed command missing statements: %q", cmd)
+	}
+	if !strings.Contains(cmd, "; ") {
+		t.Errorf("mixed command not joined with '; ': %q", cmd)
+	}
+
+	// Empty map produces empty command (caller skips the send).
+	if cmd := GenerateSingleEnvCommandPowerShell(nil); cmd != "" {
+		t.Errorf("empty overrides = %q, want empty", cmd)
+	}
+}
+
+func TestTDSessionEnvCommand(t *testing.T) {
+	cmd := tdSessionEnvCommand("sidecar-ws-feature")
+	if runtime.GOOS == "windows" {
+		want := "$env:TD_SESSION_ID = 'sidecar-ws-feature'"
+		if cmd != want {
+			t.Errorf("tdSessionEnvCommand = %q, want %q", cmd, want)
+		}
+	} else {
+		want := "export TD_SESSION_ID='sidecar-ws-feature'"
+		if cmd != want {
+			t.Errorf("tdSessionEnvCommand = %q, want %q", cmd, want)
 		}
 	}
 }

@@ -40,6 +40,20 @@ func NewScanner(r io.Reader) (*bufio.Scanner, []byte) {
 	return scanner, buf
 }
 
+// ScanLinesCounting returns a bufio.SplitFunc that behaves exactly like
+// bufio.ScanLines but adds the number of bytes actually consumed from the
+// underlying reader — including the real line terminator, whether "\n" or
+// "\r\n" — to *counter. Computing offsets as len(line)+1 undercounts CRLF
+// files by one byte per line (the Scanner strips the "\r"), which drifts
+// incremental-resume offsets into the middle of lines.
+func ScanLinesCounting(counter *int64) bufio.SplitFunc {
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, atEOF)
+		*counter += int64(advance)
+		return advance, token, err
+	}
+}
+
 // IncrementalReader wraps a file for incremental JSONL reading from an offset.
 type IncrementalReader struct {
 	file    *os.File
@@ -71,6 +85,8 @@ func NewIncrementalReader(path string, startOffset int64) (*IncrementalReader, e
 	r.scanner = bufio.NewScanner(file)
 	r.buf = GetScannerBuffer()
 	r.scanner.Buffer(r.buf, DefaultScannerMaxSize)
+	// Track exact bytes consumed (handles CRLF and missing final newline).
+	r.scanner.Split(ScanLinesCounting(&r.offset))
 
 	return r, nil
 }
@@ -86,9 +102,8 @@ func (r *IncrementalReader) Next() ([]byte, error) {
 		return nil, io.EOF
 	}
 
-	line := r.scanner.Bytes()
-	r.offset += int64(len(line)) + 1 // +1 for newline
-	return line, nil
+	// r.offset is advanced by the counting split func.
+	return r.scanner.Bytes(), nil
 }
 
 // Offset returns the current byte offset in the file.
@@ -206,6 +221,8 @@ func NewHeadReader(path string, maxLines int) (*HeadReader, error) {
 	r.scanner = bufio.NewScanner(file)
 	r.buf = GetScannerBuffer()
 	r.scanner.Buffer(r.buf, DefaultScannerMaxSize)
+	// Track exact bytes consumed (handles CRLF and missing final newline).
+	r.scanner.Split(ScanLinesCounting(&r.offset))
 
 	return r, nil
 }
@@ -225,9 +242,8 @@ func (r *HeadReader) Next() ([]byte, error) {
 	}
 
 	r.lineCount++
-	line := r.scanner.Bytes()
-	r.offset += int64(len(line)) + 1
-	return line, nil
+	// r.offset is advanced by the counting split func.
+	return r.scanner.Bytes(), nil
 }
 
 // Offset returns the current byte offset in the file.

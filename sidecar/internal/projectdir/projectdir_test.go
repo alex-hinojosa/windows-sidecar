@@ -173,6 +173,20 @@ func TestSanitizeSlug(t *testing.T) {
 		{"a b c", "a b c"},
 		{"...hidden", "...hidden"},
 		{string([]byte{0x00, 0x01}), "_"},
+		// Windows reserved device names get a "_" prefix.
+		{"nul", "_nul"},
+		{"CON", "_CON"},
+		{"com1", "_com1"},
+		{"lpt9", "_lpt9"},
+		{"nul.txt", "_nul.txt"},
+		// Not reserved: name merely starts with a reserved word.
+		{"console", "console"},
+		{"nullable", "nullable"},
+		// Windows strips trailing dots/spaces from directory names.
+		{"name.", "name"},
+		{"name  ", "name"},
+		{"name. .", "name"},
+		{"...", "_"},
 	}
 
 	for _, tc := range tests {

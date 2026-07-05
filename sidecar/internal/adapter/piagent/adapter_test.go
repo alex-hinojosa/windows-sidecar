@@ -81,7 +81,13 @@ func TestSessions_WithTestData(t *testing.T) {
 	// Create temp directory structure
 	tmpDir := t.TempDir()
 	sessionsDir := tmpDir
-	projectDir := filepath.Join(sessionsDir, "--test-project--")
+
+	a := New()
+	a.sessionsDir = sessionsDir
+
+	// Derive the encoded project directory the same way the adapter does
+	// (platform-dependent: filepath.Abs adds a drive prefix on Windows).
+	projectDir := a.projectDirPath("/test/project")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -96,9 +102,6 @@ func TestSessions_WithTestData(t *testing.T) {
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	a := New()
-	a.sessionsDir = sessionsDir
 
 	sessions, err := a.Sessions("/test/project")
 	if err != nil {
@@ -127,7 +130,11 @@ func TestSessions_WithTestData(t *testing.T) {
 func TestMessages_WithTestData(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionsDir := tmpDir
-	projectDir := filepath.Join(sessionsDir, "--test-project--")
+
+	a := New()
+	a.sessionsDir = sessionsDir
+
+	projectDir := a.projectDirPath("/test/project")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -141,9 +148,6 @@ func TestMessages_WithTestData(t *testing.T) {
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	a := New()
-	a.sessionsDir = sessionsDir
 
 	// First get sessions to populate the index
 	_, err = a.Sessions("/test/project")
@@ -202,7 +206,11 @@ func TestMessages_WithTestData(t *testing.T) {
 func TestUsage_WithTestData(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionsDir := tmpDir
-	projectDir := filepath.Join(sessionsDir, "--test-project--")
+
+	a := New()
+	a.sessionsDir = sessionsDir
+
+	projectDir := a.projectDirPath("/test/project")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +224,6 @@ func TestUsage_WithTestData(t *testing.T) {
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	a := New()
-	a.sessionsDir = sessionsDir
 
 	_, err = a.Sessions("/test/project")
 	if err != nil {

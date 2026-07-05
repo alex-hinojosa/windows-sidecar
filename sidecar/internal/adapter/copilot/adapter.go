@@ -348,10 +348,10 @@ func (a *Adapter) parseMessagesFull(path string) ([]adapter.Message, messageCach
 
 	scanner, buf := cache.NewScanner(f)
 	defer cache.PutScannerBuffer(buf)
+	scanner.Split(cache.ScanLinesCounting(&bytesRead)) // exact offsets (CRLF-safe)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		bytesRead += int64(len(line)) + 1 // +1 for newline (LF) stripped by bufio.Scanner
 
 		var event CopilotEvent
 		if err := json.Unmarshal(line, &event); err != nil {

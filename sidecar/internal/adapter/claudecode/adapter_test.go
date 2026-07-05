@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/marcus/sidecar/internal/adapter"
@@ -430,9 +431,9 @@ func TestSlugExtraction_SessionsIntegration(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := &Adapter{projectsDir: tmpDir, sessionIndex: make(map[string]string), metaCache: make(map[string]sessionMetaCacheEntry)}
 
-	// Create project hash dir that matches what projectDirPath would generate
-	// For path "/test/project", the hash is "-test-project"
-	projectDir := tmpDir + "/-test-project"
+	// Create project hash dir that matches what projectDirPath generates
+	// (platform-dependent: filepath.Abs adds a drive prefix on Windows).
+	projectDir := a.projectDirPath("/test/project")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("failed to create project dir: %v", err)
 	}
@@ -637,61 +638,109 @@ func TestDiscoverRelatedProjectDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := &Adapter{projectsDir: tmpDir}
 
-	// Create test directories
-	// Claude Code encoding: /Users/test/code/myrepo -> -Users-test-code-myrepo
-	// KNOWN LIMITATION: Decoding is lossy - hyphens in original paths become slashes.
-	// E.g., worktree at /Users/test/code/myrepo-feature encodes to -Users-test-code-myrepo-feature
-	// but decodes to /Users/test/code/myrepo/feature (incorrect, but acceptable for discovery purposes)
+	// Create test directories using the same encoding Claude Code applies to
+	// the platform-absolute form of the main path. On POSIX
+	// /Users/test/code/myrepo -> -Users-test-code-myrepo; on Windows
+	// filepath.Abs prepends the drive, e.g. C:\Users\test\code\myrepo ->
+	// C--Users-test-code-myrepo.
+	// KNOWN LIMITATION: Decoding is lossy - hyphens in original paths become
+	// separators. E.g., worktree at /Users/test/code/myrepo-feature encodes to
+	// -Users-test-code-myrepo-feature but decodes to
+	// /Users/test/code/myrepo/feature (incorrect, but acceptable for discovery
+	// purposes because re-encoding round-trips to the same directory name).
+	mainPath := "/Users/test/code/myrepo"
+	absMain, err := filepath.Abs(mainPath)
+	if err != nil {
+		t.Fatalf("failed to abs main path: %v", err)
+	}
+	encodedMain := encodeProjectPath(absMain)
 	dirs := []string{
-		"-Users-test-code-myrepo",         // main repo
-		"-Users-test-code-myrepo-feature", // worktree (decodes with slash, not hyphen)
-		"-Users-test-code-myrepo-bugfix",  // worktree (decodes with slash, not hyphen)
-		"-Users-test-other",               // unrelated project
-		"-Users-test-code-myrepo2",        // different repo (myrepo2, not myrepo)
+		encodedMain,              // main repo
+		encodedMain + "-feature", // worktree
+		encodedMain + "-bugfix",  // worktree
+		"-Users-test-other",      // unrelated project
+		encodedMain + "2",        // different repo (myrepo2, not myrepo)
 	}
 	for _, d := range dirs {
-		if err := os.MkdirAll(tmpDir+"/"+d, 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, d), 0755); err != nil {
 			t.Fatalf("failed to create dir: %v", err)
 		}
 	}
 
-	tests := []struct {
-		name     string
-		mainPath string
-		want     []string
-	}{
-		{
-			name:     "finds related paths",
-			mainPath: "/Users/test/code/myrepo",
-			// Note: decoded paths have slashes where original had hyphens (known limitation)
-			want: []string{"/Users/test/code/myrepo", "/Users/test/code/myrepo/feature", "/Users/test/code/myrepo/bugfix"},
-		},
-		{
-			name:     "empty for invalid main path",
-			mainPath: "",
-			want:     nil,
-		},
-	}
+	t.Run("finds related paths", func(t *testing.T) {
+		got, err := a.DiscoverRelatedProjectDirs(mainPath)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if len(got) != 3 {
+			t.Errorf("expected 3 paths, got %d: %v", len(got), got)
+		}
+		related := map[string]bool{
+			encodedMain:              true,
+			encodedMain + "-feature": true,
+			encodedMain + "-bugfix":  true,
+		}
+		for _, p := range got {
+			// Decoded paths must re-encode to one of the matched directories.
+			reEncoded := encodeProjectPath(p)
+			if !related[reEncoded] {
+				t.Errorf("decoded path %q re-encodes to %q, not a related dir", p, reEncoded)
+			}
+		}
+	})
 
+	t.Run("empty for invalid main path", func(t *testing.T) {
+		got, err := a.DiscoverRelatedProjectDirs("")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("expected no paths, got %v", got)
+		}
+	})
+}
+
+func TestEncodeProjectPath(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		// Windows: drive colon and backslashes each become "-", so
+		// C:\snapdragon -> C--snapdragon (verified against real
+		// ~/.claude/projects directory names).
+		{`C:\snapdragon`, "C--snapdragon"},
+		{`C:\Users\alexa`, "C--Users-alexa"},
+		{`C:\dev\glass-box-legal`, "C--dev-glass-box-legal"},
+		// POSIX: "/", ".", "_" become "-".
+		{"/Users/foo/code/github.com/my_project", "-Users-foo-code-github-com-my-project"},
+		{"/home/user/myrepo", "-home-user-myrepo"},
+	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := a.DiscoverRelatedProjectDirs(tt.mainPath)
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-			}
-			// Check we got expected paths (order may vary)
-			if tt.name == "finds related paths" {
-				if len(got) != 3 {
-					t.Errorf("expected 3 paths, got %d: %v", len(got), got)
-				}
-				// Verify myrepo2 and other are not included
-				for _, p := range got {
-					if p == "/Users/test/other" || p == "/Users/test/code/myrepo2" {
-						t.Errorf("should not include unrelated path: %s", p)
-					}
-				}
-			}
-		})
+		if got := encodeProjectPath(tt.in); got != tt.want {
+			t.Errorf("encodeProjectPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestDecodeProjectDirName_RoundTrip(t *testing.T) {
+	// Decoding is lossy, but re-encoding a decoded name must always
+	// reproduce the original directory name.
+	names := []string{
+		"C--snapdragon",
+		"C--Users-alexa",
+		"C--dev-glass-box-legal",
+		"-Users-foo-code-github-com-my-project",
+		"-home-user-myrepo",
+	}
+	for _, name := range names {
+		decoded := decodeProjectDirName(name)
+		if got := encodeProjectPath(decoded); got != name {
+			t.Errorf("round trip failed for %q: decoded to %q, re-encoded to %q", name, decoded, got)
+		}
+	}
+	// Spot-check the Windows decode shape.
+	if got := decodeProjectDirName("C--snapdragon"); got != `C:\snapdragon` {
+		t.Errorf("decodeProjectDirName(C--snapdragon) = %q, want C:\\snapdragon", got)
 	}
 }
 

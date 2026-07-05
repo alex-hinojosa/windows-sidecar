@@ -1096,12 +1096,13 @@ func (p *Plugin) startAgentWithResumeCmd(wt *Worktree, agentType AgentType, skip
 			strconv.Itoa(tmuxHistoryLimit)).Run()
 
 		// Set TD_SESSION_ID environment variable for td session tracking
-		tdEnvCmd := fmt.Sprintf("export TD_SESSION_ID=%s", shellQuote(sessionName))
+		// (syntax matches the pane shell: PowerShell on Windows, POSIX sh elsewhere)
+		tdEnvCmd := tdSessionEnvCommand(sessionName)
 		_ = exec.Command("tmux", "send-keys", "-t", sessionName, tdEnvCmd, "Enter").Run()
 
 		// Apply environment isolation
 		envOverrides := BuildEnvOverrides(p.ctx.WorkDir)
-		if envCmd := GenerateSingleEnvCommand(envOverrides); envCmd != "" {
+		if envCmd := GenerateSingleEnvCommandForPane(envOverrides); envCmd != "" {
 			_ = exec.Command("tmux", "send-keys", "-t", sessionName, envCmd, "Enter").Run()
 		}
 

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // pure-Go driver: works with CGO_ENABLED=0 (Windows builds)
 
 	"github.com/marcus/sidecar/internal/tdroot"
 )
@@ -49,7 +49,9 @@ type Store struct {
 // NewStore creates a new Store with the given database path and session ID.
 // If sessionID is empty, it checks TD_SESSION_ID env var, then falls back to "sidecar".
 func NewStore(dbPath, sessionID string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	// modernc.org/sqlite pragma syntax (equivalent of mattn's
+	// _busy_timeout=5000&_journal_mode=WAL).
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
